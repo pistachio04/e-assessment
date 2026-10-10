@@ -1,0 +1,227 @@
+<script>
+/* ===================== Siswa: daftar ujian, mengerjakan, hasil ===================== */
+let Q = null;   // state ujian yang sedang dikerjakan
+
+views.exams = async function () {
+  const exams = await api('listExams');
+  if (!exams.length) return main('<div class="card empty"><h2>Belum ada ujian</h2><p>Ujian yang tersedia akan muncul di sini.</p></div>');
+  main('<h1>Daftar Ujian</h1><p class="muted mb">Pilih ujian lalu klik <b>Mulai</b>. Jawabanmu tersimpan otomatis.</p>' +
+    '<div class="grid gauto">' + exams.map(examCard).join('') + '</div>');
+};
+
+function examCard(e) {
+  const left = e.maxAttempts > 0 ? e.maxAttempts - e.attemptsUsed : null;
+  const blocked = !e.runningAttemptId && left !== null && left <= 0;
+  const btn = e.runningAttemptId
+    ? '<button class="btn primary" data-act="startExam" data-id="' + e.id + '">▶ Lanjutkan</button>'
+    : blocked ? '<button class="btn" disabled>Kesempatan habis</button>'
+      : '<button class="btn primary" data-act="startExam" data-id="' + e.id + '" data-confirm="1">' + (e.attemptsUsed ? '🔁 Ulangi' : '▶ Mulai') + '</button>';
+  const last = e.lastAttemptId ? '<button class="btn" data-act="viewResult" data-id="' + e.lastAttemptId + '">Hasil terakhir</button>' : '';
+  return '<div class="card exam"><h3>' + esc(e.title) + '</h3>' +
+    '<div class="muted small pre">' + esc(e.description || '') + '</div>' +
+    '<div class="meta"><span class="badge">' + e.questionCount + ' soal</span>' +
+    '<span class="badge gray">' + (e.duration ? e.duration + ' menit' : 'Tanpa batas waktu') + '</span>' +
+    '<span class="badge gray">KKM ' + e.passScore + '</span>' +
+    (left !== null ? '<span class="badge warn">Sisa kesempatan: ' + Math.max(0, left) + '</span>' : '') +
+    (e.runningAttemptId ? '<span class="badge warn">Sedang berjalan</span>' : '') +
+    (e.lastScore !== null ? '<span class="badge ' + scoreClass(e.lastScore, e.passScore) + '">Nilai terakhir ' + num(e.lastScore) + '</span>' : '') +
+    '</div><div class="row">' + btn + last + '</div></div>';
+}
+
+actions.startExam = async (d) => {
+  if (d.confirm && !(await confirmBox('Mulai ujian?', 'Waktu akan mulai berjalan setelah kamu menekan "Mulai". Pastikan koneksi internetmu stabil.', 'Mulai'))) return;
+  const r = await api('startExam', { examId: d.id });
+  await openQuiz(r.attemptId);
+};
+actions.viewResult = d => showResult(d.id);
+
+views.history = async function () {
+  const rows = await api('myHistory');
+  if (!rows.length) return main('<div class="card empty"><h2>Belum ada riwayat</h2><p>Selesaikan sebuah ujian untuk melihat hasilnya di sini.</p></div>');
+  const best = Math.max.apply(null, rows.map(r => r.score));
+  main('<h1>Riwayat Nilai</h1><div class="grid g3 mb">' +
+    '<div class="card stat"><span class="v">' + rows.length + '</span><span class="l">Ujian dikerjakan</span></div>' +
+    '<div class="card stat"><span class="v">' + num(Math.round(rows.reduce((s, r) => s + r.score, 0) / rows.length * 10) / 10) + '</span><span class="l">Rata-rata nilai</span></div>' +
+    '<div class="card stat"><span class="v">' + num(best) + '</span><span class="l">Nilai tertinggi</span></div></div>' +
+    '<div class="card tablewrap"><table><thead><tr><th>Ujian</th><th>Waktu</th><th>Benar</th><th>Nilai</th><th>Status</th><th></th></tr></thead><tbody>' +
+    rows.map(r => '<tr><td><b>' + esc(r.examTitle) + '</b></td><td>' + fmtDate(r.submittedAt) + '</td><td>' + r.correctCount + '/' + r.total + '</td>' +
+      '<td><b>' + num(r.score) + '</b></td><td><span class="badge ' + (r.passed ? 'ok' : 'bad') + '">' + (r.passed ? 'Tuntas' : 'Belum tuntas') + '</span></td>' +
+      '<td class="right"><button class="btn sm" data-act="viewResult" data-id="' + r.attemptId + '">Detail</button></td></tr>').join('') +
+    '</tbody></table></div>');
+};
+
+/* ---------- Mengerjakan ujian ---------- */
+async function openQuiz(attemptId) {
+  const d = await api('getAttempt', { attemptId: attemptId });
+  if (d.finished) return showResult(d.attemptId);
+  S.offset = d.serverNow - Date.now();
+  Q = {
+    id: d.attempt.id, title: d.attempt.examTitle, deadline: d.attempt.deadline,
+    questions: d.questions, answers: d.attempt.answers || {}, idx: 0, flags: {},
+    saving: false, dirty: false, timer: null, finishing: false
+  };
+  renderQuiz();
+  if (Q.deadline) {
+    Q.timer = setInterval(tick, 1000);
+    tick();
+  }
+  window.onbeforeunload = () => 'Ujian sedang berlangsung.';
+  document.addEventListener('keydown', quizKeys);
+}
+
+function quizEnd() {
+  if (Q && Q.timer) clearInterval(Q.timer);
+  window.onbeforeunload = null;
+  document.removeEventListener('keydown', quizKeys);
+}
+
+function renderQuiz() {
+  const total = Q.questions.length;
+  $('#app').innerHTML =
+    '<div class="quiz-top"><div class="in"><div class="brand grow" style="min-width:0"><span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(Q.title) + '</span></div>' +
+    '<span class="small muted" id="saveState">Tersimpan ✓</span>' +
+    (Q.deadline ? '<span class="timer" id="timer">--:--</span>' : '') +
+    '<button class="btn primary sm" data-act="finish">Selesai</button></div></div>' +
+    '<div class="quiz-body"><div class="card" id="qcard"></div>' +
+    '<div class="card"><h3>Navigasi Soal</h3><div class="navgrid" id="qnav"></div>' +
+    '<div class="legend"><span>🟦 Terjawab</span><span>⬜ Belum</span><span>⚑ Ragu-ragu</span></div>' +
+    '<p class="small muted mt">Pintasan: tombol <b>A–E</b> untuk memilih, <b>←/→</b> untuk pindah soal.</p></div></div>';
+  drawQuestion();
+}
+
+function drawQuestion() {
+  const q = Q.questions[Q.idx], total = Q.questions.length;
+  const sel = Q.answers[q.id];
+  $('#qcard').innerHTML =
+    '<div class="row between mb"><span class="badge">Soal ' + (Q.idx + 1) + ' dari ' + total + '</span>' +
+    '<button class="btn sm" data-act="flag">' + (Q.flags[q.id] ? '⚑ Batalkan ragu-ragu' : '⚐ Tandai ragu-ragu') + '</button></div>' +
+    '<div class="qtext pre">' + rich(q.text) + '</div>' +
+    q.options.map(o => '<button class="opt ' + (sel === o.k ? 'sel' : '') + '" data-act="pick" data-k="' + o.k + '"><span class="k">' + o.k + '</span><span class="pre">' + rich(o.t) + '</span></button>').join('') +
+    '<div class="row between mt"><button class="btn" data-act="qprev" ' + (Q.idx === 0 ? 'disabled' : '') + '>← Sebelumnya</button>' +
+    (Q.idx === total - 1 ? '<button class="btn primary" data-act="finish">Selesai ✓</button>' : '<button class="btn primary" data-act="qnext">Berikutnya →</button>') + '</div>';
+  typeset($('#qcard'));
+  drawNav();
+}
+
+function drawNav() {
+  $('#qnav').innerHTML = Q.questions.map((q, i) =>
+    '<button data-act="qgo" data-i="' + i + '" class="' + (Q.answers[q.id] ? 'ans ' : '') + (i === Q.idx ? 'cur ' : '') + (Q.flags[q.id] ? 'flag' : '') + '">' + (i + 1) + '</button>').join('');
+}
+
+actions.pick = d => {
+  const q = Q.questions[Q.idx];
+  Q.answers[q.id] = d.k;
+  drawQuestion();
+  queueSave();
+};
+actions.flag = () => { const q = Q.questions[Q.idx]; Q.flags[q.id] = !Q.flags[q.id]; drawQuestion(); };
+actions.qprev = () => { if (Q.idx > 0) { Q.idx--; drawQuestion(); } };
+actions.qnext = () => { if (Q.idx < Q.questions.length - 1) { Q.idx++; drawQuestion(); } };
+actions.qgo = d => { Q.idx = Number(d.i); drawQuestion(); };
+
+function quizKeys(e) {
+  if (!Q || e.target.closest('input,textarea,select') || document.querySelector('.overlay')) return;
+  const k = e.key.toLowerCase();
+  const q = Q.questions[Q.idx];
+  if (q.options.some(o => o.k === k) && !e.ctrlKey && !e.metaKey) actions.pick({ k: k });
+  else if (e.key === 'ArrowRight') actions.qnext();
+  else if (e.key === 'ArrowLeft') actions.qprev();
+}
+
+function setSaveState(t) { const el = $('#saveState'); if (el) el.textContent = t; }
+
+/* Autosave berantai: hanya 1 request berjalan; perubahan terbaru selalu terkirim. */
+function queueSave() {
+  if (!Q) return;
+  Q.dirty = true;
+  if (!Q.saving) flushSave();
+}
+async function flushSave() {
+  const cur = Q;
+  cur.saving = true;
+  while (Q === cur && cur.dirty) {
+    cur.dirty = false;
+    setSaveState('Menyimpan…');
+    try {
+      const r = await api('saveAnswers', { attemptId: cur.id, answers: cur.answers }, { silent: true });
+      if (r.expired) { cur.saving = false; return finishQuiz(true); }
+      setSaveState('Tersimpan ✓');
+    } catch (e) {
+      if (e.auth) return;
+      cur.dirty = true;
+      setSaveState('⚠ Gagal menyimpan, mencoba lagi…');
+      await sleep(3000);
+    }
+  }
+  cur.saving = false;
+}
+
+function tick() {
+  if (!Q || !Q.deadline) return;
+  const left = Q.deadline - (Date.now() + S.offset);
+  const el = $('#timer');
+  if (left <= 0) { if (el) el.textContent = '00:00'; return finishQuiz(true); }
+  const s = Math.floor(left / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  if (el) {
+    el.textContent = (h ? h + ':' : '') + String(m).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+    el.classList.toggle('low', left < 60000);
+  }
+}
+
+actions.finish = async () => {
+  const unanswered = Q.questions.filter(q => !Q.answers[q.id]).length;
+  const flagged = Q.questions.filter(q => Q.flags[q.id]).length;
+  let msg = 'Kumpulkan jawaban sekarang? Setelah dikumpulkan, jawaban tidak bisa diubah.';
+  if (unanswered) msg = '⚠ Masih ada ' + unanswered + ' soal yang belum dijawab.\n\n' + msg;
+  if (flagged) msg += '\n(' + flagged + ' soal masih ditandai ragu-ragu)';
+  if (await confirmBox('Selesaikan ujian?', msg, 'Kumpulkan')) await finishQuiz(false);
+};
+
+async function finishQuiz(auto) {
+  if (!Q || Q.finishing) return;
+  const cur = Q;
+  cur.finishing = true;
+  if (auto) toast('Waktu habis — jawaban dikumpulkan otomatis.', 'err');
+  try {
+    const r = await api('submit', { attemptId: cur.id, answers: cur.answers });
+    quizEnd(); Q = null;
+    await showResult(r.attemptId);
+  } catch (e) {
+    cur.finishing = false;     // biarkan siswa mencoba lagi
+    if (!e.auth) toast(e.message, 'err');
+  }
+}
+
+/* ---------- Hasil ---------- */
+async function showResult(attemptId) {
+  const r = await api('getResult', { attemptId: attemptId });
+  $$('.overlay').forEach(o => o.remove());
+  if (!$('#main')) { renderShell(); }
+  const cls = r.passed ? 'ok' : 'bad';
+  const color = r.passed ? 'var(--ok)' : 'var(--bad)';
+  $$('.nav button').forEach(b => b.classList.remove('active'));
+  main('<div class="card center"><p class="muted">' + esc(r.examTitle) + '</p>' +
+    '<div class="score-ring" style="background:conic-gradient(' + color + ' ' + (r.score * 3.6) + 'deg,#eceff5 0);position:relative">' +
+    '<div style="position:absolute;inset:12px;background:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;color:' + color + '">' + num(r.score) + '</div></div>' +
+    '<span class="badge ' + cls + '" style="font-size:.9rem">' + (r.passed ? '🎉 Tuntas' : 'Belum tuntas') + ' (KKM ' + r.passScore + ')</span>' +
+    '<div class="row mt" style="justify-content:center;gap:28px"><div class="stat"><span class="v" style="color:var(--ok)">' + r.correctCount + '</span><span class="l">Benar</span></div>' +
+    '<div class="stat"><span class="v" style="color:var(--bad)">' + r.wrongCount + '</span><span class="l">Salah / kosong</span></div>' +
+    '<div class="stat"><span class="v">' + fmtDur(r.durationMs) + '</span><span class="l">Durasi</span></div></div>' +
+    '<div class="mt"><button class="btn primary" data-act="nav" data-v="exams">← Kembali ke daftar ujian</button></div></div>' +
+    (r.review ? '<h2 class="mt">Pembahasan</h2>' + r.review.map(reviewItem).join('') :
+      '<div class="card mt muted center">Pembahasan soal tidak ditampilkan untuk ujian ini.</div>'));
+}
+
+function reviewItem(q, i) {
+  const ok = q.chosen === q.correct;
+  return '<div class="card"><div class="row between"><b>Soal ' + (i + 1) + '</b>' +
+    '<span class="badge ' + (ok ? 'ok' : 'bad') + '">' + (ok ? 'Benar' : (q.chosen ? 'Salah' : 'Tidak dijawab')) + '</span></div>' +
+    '<div class="qtext pre mt">' + rich(q.text) + '</div>' +
+    q.options.map(o => {
+      const c = o.k === q.correct ? 'right' : (o.k === q.chosen ? 'wrong' : '');
+      return '<div class="opt static ' + c + '"><span class="k">' + o.k + '</span><span class="pre">' + rich(o.t) + '</span>' +
+        (o.k === q.chosen ? '<span class="small muted" style="margin-left:auto">jawabanmu</span>' : '') + '</div>';
+    }).join('') +
+    (q.explanation ? '<div class="explain"><b>Pembahasan:</b> <span class="pre">' + rich(q.explanation) + '</span></div>' : '') + '</div>';
+}
+</script>

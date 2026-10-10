@@ -1,0 +1,442 @@
+<script>
+/* ===================== Guru: dashboard, bank soal, paket ujian, siswa, hasil ===================== */
+const T = {
+  questions: [], students: [],
+  dash: { examId: '', class: '' },
+  qf: { q: '', topic: '' },
+  sf: { q: '', cls: '' },
+  res: { examId: '', class: '' }, resRows: []
+};
+const LETTERS = ['a', 'b', 'c', 'd', 'e'];
+const snip = (s, n) => { s = plain(s).replace(/\s+/g, ' '); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const optsSelect = (list, sel, label) => '<option value="">' + label + '</option>' +
+  list.map(x => { const v = typeof x === 'object' ? x.id : x, t = typeof x === 'object' ? x.title : x; return '<option value="' + esc(v) + '"' + (v === sel ? ' selected' : '') + '>' + esc(t) + '</option>'; }).join('');
+
+/* ---------------------------------------------------------------- Dashboard */
+views.dashboard = async function () {
+  const d = await api('dashboard', T.dash);
+  const t = d.totals;
+  const maxDist = Math.max.apply(null, d.distribution.concat([1]));
+  const maxDay = Math.max.apply(null, d.daily.map(x => x.count).concat([1]));
+
+  const tips = [];
+  if (d.topics.length) {
+    const w = d.topics[0];
+    if (w.correctRate < 70) tips.push('Topik <b>' + esc(w.topic) + '</b> paling lemah (' + num(w.correctRate) + '% benar) — pertimbangkan pembahasan ulang atau remedial.');
+  }
+  if (d.mostMissed.length && d.mostMissed[0].wrongRate >= 50) {
+    const m = d.mostMissed[0];
+    tips.push('Soal "<i>' + esc(snip(m.text, 60)) + '</i>" salah dijawab ' + num(m.wrongRate) + '% siswa' +
+      (m.topWrong ? ', pengecoh terpopuler: opsi <b>' + m.topWrong.key.toUpperCase() + '</b>' : '') + '. Periksa kejelasan soal & kunci.');
+  }
+  const risk = d.atRisk.filter(a => a.avgScore < 60).length;
+  if (risk) tips.push('<b>' + risk + ' siswa</b> memiliki rata-rata nilai di bawah 60 — lihat daftar "Perlu perhatian".');
+
+  main(
+    '<div class="row between mb"><h1 style="margin:0">Dashboard</h1><div class="toolbar" style="margin:0">' +
+    '<select name="examId" data-change="dashFilter">' + optsSelect(d.filters.exams, T.dash.examId, 'Semua ujian') + '</select>' +
+    '<select name="class" data-change="dashFilter">' + optsSelect(d.filters.classes, T.dash.class, 'Semua kelas') + '</select>' +
+    '<button class="btn" data-act="nav" data-v="dashboard">⟳ Muat ulang</button></div></div>' +
+
+    '<div class="grid g4 mb">' +
+    stat(t.participants + ' / ' + t.students, 'Siswa berpartisipasi') + stat(t.attempts, 'Total pengerjaan') +
+    stat(num(t.avgScore), 'Rata-rata nilai') + stat(num(t.passRate) + '%', 'Tingkat ketuntasan') +
+    stat(t.questions, 'Butir soal') + stat(t.exams, 'Paket ujian') +
+    stat(num(t.avgDurationMin) + ' mnt', 'Rata-rata durasi') + '</div>' +
+
+    (!t.attempts ? '<div class="card empty"><h2>Belum ada data pengerjaan</h2><p>Analisis akan muncul setelah siswa mengumpulkan ujian.</p></div>' :
+      (tips.length ? '<div class="insight mb"><b>💡 Rekomendasi</b><ul style="margin:6px 0 0;padding-left:20px">' + tips.map(x => '<li>' + x + '</li>').join('') + '</ul></div>' : '') +
+
+      '<div class="card"><h2>🔥 Soal paling banyak dijawab salah</h2><p class="muted small">Klik baris untuk melihat siswa yang salah (bahan remedial).</p>' +
+      (d.mostMissed.length ? '<div class="tablewrap"><table><thead><tr><th>#</th><th>Soal</th><th>Dijawab</th><th style="min-width:150px">% Salah</th><th>Pengecoh terpopuler</th><th>Kunci</th></tr></thead><tbody>' +
+        d.mostMissed.map((m, i) => '<tr class="click" data-act="wrongStudents" data-id="' + m.id + '"><td>' + (i + 1) + '</td>' +
+          '<td><div>' + esc(m.text) + '</div><span class="badge gray">' + esc(m.topic) + '</span></td><td>' + m.answered + '</td>' +
+          '<td><b>' + num(m.wrongRate) + '%</b>' + bar(m.wrongRate, 'bad') + '</td>' +
+          '<td>' + (m.topWrong ? '<b>' + m.topWrong.key.toUpperCase() + '</b> (' + m.topWrong.count + ' siswa)' : '-') + '</td>' +
+          '<td><span class="badge ok">' + m.correct.toUpperCase() + '</span></td></tr>').join('') + '</tbody></table></div>' :
+        '<div class="empty">Semua soal dijawab benar 🎉</div>') + '</div>' +
+
+      '<div class="grid g2 mt"><div class="card"><h2>📚 Penguasaan per topik</h2>' +
+      d.topics.map(x => '<div class="mb"><div class="row between small"><span>' + esc(x.topic) + ' <span class="muted">(' + x.answered + ' jawaban)</span></span><b>' + num(x.correctRate) + '%</b></div>' + bar(x.correctRate, rateClass(x.correctRate)) + '</div>').join('') + '</div>' +
+      '<div class="card"><h2>📈 Distribusi nilai</h2><div class="hist">' +
+      d.distribution.map((c, i) => '<div class="col"><em>' + (c || '') + '</em><b style="height:' + (c / maxDist * 100) + '%;background:' + (i < 6 ? 'var(--bad)' : i < 8 ? 'var(--warn)' : 'var(--ok)') + '"></b><span>' + (i * 10) + (i === 9 ? '+' : '') + '</span></div>').join('') +
+      '</div></div></div>' +
+
+      '<div class="grid g2 mt"><div class="card"><h2>🗂️ Ringkasan per ujian</h2><div class="tablewrap"><table><thead><tr><th>Ujian</th><th>Pengerjaan</th><th>Rata-rata</th><th>Tuntas</th></tr></thead><tbody>' +
+      d.examSummary.map(e => '<tr><td>' + esc(e.title) + '</td><td>' + e.attempts + '</td><td><b>' + num(e.avgScore) + '</b></td><td>' + num(e.passRate) + '%</td></tr>').join('') + '</tbody></table></div></div>' +
+      '<div class="card"><h2>⚠️ Perlu perhatian</h2><p class="muted small">Siswa dengan rata-rata nilai terendah.</p><div class="tablewrap"><table><tbody>' +
+      d.atRisk.map(a => '<tr class="click" data-act="studentDetail" data-id="' + a.id + '"><td>' + esc(a.name) + ' <span class="muted small">' + esc(a.class) + '</span></td><td style="width:120px">' + bar(a.avgScore, rateClass(a.avgScore)) + '</td><td><b>' + num(a.avgScore) + '</b></td></tr>').join('') + '</tbody></table></div></div></div>' +
+
+      '<div class="grid g2 mt"><div class="card"><h2>🗓️ Aktivitas 14 hari terakhir</h2><div class="hist">' +
+      d.daily.map(x => '<div class="col" title="' + (x.avg == null ? '' : 'Rata-rata ' + x.avg) + '"><em>' + (x.count || '') + '</em><b style="height:' + (x.count / maxDay * 100) + '%"></b><span>' + fmtDay(x.day).split(' ')[0] + '</span></div>').join('') + '</div></div>' +
+      '<div class="card"><h2>🕒 Pengerjaan terbaru</h2><div class="tablewrap"><table><tbody>' +
+      d.recent.map(r => '<tr><td>' + esc(r.name) + ' <span class="muted small">' + esc(r.class) + '</span><br><span class="muted small">' + esc(r.exam) + ' · ' + fmtDate(r.at) + '</span></td><td class="right"><b>' + num(r.score) + '</b></td></tr>').join('') + '</tbody></table></div></div></div>'));
+};
+const stat = (v, l) => '<div class="card stat"><span class="v">' + esc(v) + '</span><span class="l">' + esc(l) + '</span></div>';
+
+actions.dashFilter = (d, el) => { T.dash[el.name] = el.value; return go('dashboard'); };
+
+actions.wrongStudents = d => showWrongStudents(d.id, T.dash);
+actions.wrongStudentsExam = d => showWrongStudents(d.id, T.res);
+
+async function showWrongStudents(questionId, filter) {
+  const r = await api('wrongStudents', { questionId: questionId, examId: filter.examId, class: filter.class });
+  const q = r.question;
+  modal({
+    title: 'Siswa yang menjawab salah', size: 'lg', hideFooter: true,
+    body: '<div class="pre"><b>' + rich(q.text) + '</b></div><div class="mt">' +
+      LETTERS.filter(k => q.options[k]).map(k => '<div class="opt static ' + (k === q.correct ? 'right' : '') + '"><span class="k">' + k + '</span><span class="pre">' + rich(q.options[k]) + '</span></div>').join('') + '</div>' +
+      (q.explanation ? '<div class="explain"><b>Pembahasan:</b> <span class="pre">' + rich(q.explanation) + '</span></div>' : '') +
+      '<div class="row between mt mb"><h3 style="margin:0">' + r.students.length + ' siswa</h3>' +
+      (r.students.length ? '<button class="btn sm" id="dlRem">⬇ Unduh daftar remedial</button>' : '') + '</div>' +
+      '<div class="tablewrap"><table><thead><tr><th>Nama</th><th>Kelas</th><th>Memilih</th><th>Ujian</th></tr></thead><tbody>' +
+      r.students.map(s => '<tr><td>' + esc(s.name) + '</td><td>' + esc(s.class) + '</td><td>' + (s.chosen ? '<span class="badge bad">' + s.chosen.toUpperCase() + '</span>' : '<span class="badge gray">kosong</span>') + '</td><td>' + esc(s.exam) + '</td></tr>').join('') + '</tbody></table></div>',
+    onOpen: ov => {
+      const b = $('#dlRem', ov);
+      if (b) b.onclick = () => downloadFile('remedial.csv', toCSV([['Nama', 'Kelas', 'Jawaban dipilih', 'Ujian']].concat(r.students.map(s => [s.name, s.class, (s.chosen || '').toUpperCase(), s.exam]))));
+    }
+  });
+}
+
+actions.studentDetail = async d => {
+  const r = await api('studentDetail', { userId: d.id });
+  modal({
+    title: r.user.name + (r.user.class ? ' — ' + r.user.class : ''), size: 'lg', hideFooter: true,
+    body: '<h3>Penguasaan per topik</h3>' + (r.topics.length ? r.topics.map(x => '<div class="mb"><div class="row between small"><span>' + esc(x.topic) + '</span><b>' + num(x.correctRate) + '%</b></div>' + bar(x.correctRate, rateClass(x.correctRate)) + '</div>').join('') : '<p class="muted">Belum ada data.</p>') +
+      (r.weakQuestions.length ? '<h3 class="mt">Soal yang sering salah</h3><ul>' + r.weakQuestions.map(w => '<li>' + esc(w.text) + ' <span class="badge gray">' + esc(w.topic) + '</span> <span class="badge bad">' + w.times + '× salah</span></li>').join('') + '</ul>' : '') +
+      '<h3 class="mt">Riwayat ujian</h3><div class="tablewrap"><table><thead><tr><th>Ujian</th><th>Waktu</th><th>Benar</th><th>Nilai</th></tr></thead><tbody>' +
+      r.attempts.map(a => '<tr><td>' + esc(a.exam) + '</td><td>' + fmtDate(a.at) + '</td><td>' + a.correct + '/' + a.total + '</td><td><span class="badge ' + (a.passed ? 'ok' : 'bad') + '">' + num(a.score) + '</span></td></tr>').join('') + '</tbody></table></div>'
+  });
+};
+
+/* --------------------------------------------------------------- Bank soal */
+views.questions = async function () {
+  T.questions = await api('listQuestions');
+  const topics = Array.from(new Set(T.questions.map(q => q.topic))).sort();
+  main('<div class="row between mb"><h1 style="margin:0">Bank Soal</h1><div class="row">' +
+    '<button class="btn" data-act="importQ">⬆ Impor CSV</button><button class="btn primary" data-act="editQ">+ Tambah Soal</button></div></div>' +
+    '<div class="card"><div class="toolbar"><input type="text" placeholder="🔍 Cari soal…" data-input="qFilter" name="q" value="' + esc(T.qf.q) + '">' +
+    '<select name="topic" data-change="qFilter">' + optsSelect(topics, T.qf.topic, 'Semua topik') + '</select><span class="muted small" id="qCount"></span></div>' +
+    '<div class="tablewrap"><table><thead><tr><th>#</th><th>Topik</th><th>Soal</th><th>Kunci</th><th></th></tr></thead><tbody id="qBody"></tbody></table></div></div>');
+  drawQ();
+};
+function drawQ() {
+  const q = T.qf.q.toLowerCase();
+  const list = T.questions.filter(x => (!T.qf.topic || x.topic === T.qf.topic) && (!q || (x.text + ' ' + x.topic).toLowerCase().indexOf(q) >= 0));
+  $('#qCount').textContent = list.length + ' dari ' + T.questions.length + ' soal';
+  $('#qBody').innerHTML = list.length ? list.map((x, i) =>
+    '<tr><td>' + (i + 1) + '</td><td><span class="badge">' + esc(x.topic) + '</span></td><td class="pre">' + esc(snip(x.text, 180)) + '</td>' +
+    '<td><span class="badge ok">' + x.correct.toUpperCase() + '</span></td>' +
+    '<td class="right" style="white-space:nowrap"><button class="btn sm" data-act="editQ" data-id="' + x.id + '">Edit</button> ' +
+    '<button class="btn sm danger" data-act="delQ" data-id="' + x.id + '">Hapus</button></td></tr>').join('') :
+    '<tr><td colspan="5" class="empty">Belum ada soal. Klik "Tambah Soal" atau "Impor CSV".</td></tr>';
+}
+actions.qFilter = (d, el) => { T.qf[el.name] = el.value; drawQ(); };
+
+actions.editQ = d => {
+  const q = T.questions.find(x => x.id === d.id) || {};
+  const topics = Array.from(new Set(T.questions.map(x => x.topic)));
+  modal({
+    title: q.id ? 'Edit Soal' : 'Tambah Soal', size: 'lg',
+    body: '<datalist id="topicList">' + topics.map(t => '<option value="' + esc(t) + '">').join('') + '</datalist>' +
+      '<div class="grid g2"><div class="field"><label class="f">Topik / materi</label><input type="text" name="topic" list="topicList" value="' + esc(q.topic || '') + '" placeholder="mis. Aljabar"></div>' +
+      '<div class="field" style="align-items:flex-end;justify-content:center"><button type="button" class="btn sm" id="btnImg">📷 Upload Gambar</button><input type="file" id="fileImg" accept="image/*" style="display:none"></div></div>' +
+      '<div class="grid g2" style="gap:1rem;align-items:start"><div style="display:flex;flex-direction:column;gap:8px">' +
+      '<div class="field"><label class="f">Pertanyaan *</label><textarea id="qt" name="text" rows="3">' + esc(q.text || '') + '</textarea></div>' +
+      '<div class="grid g2">' + LETTERS.map(k => '<div class="field"><label class="f">Opsi ' + k.toUpperCase() + (k < 'c' ? ' *' : ' (opsional)') + '</label><input type="text" class="qo" name="' + k + '" value="' + esc(q[k] || '') + '"></div>').join('') +
+      '<div class="field"><label class="f">Kunci jawaban *</label><select name="correct">' + LETTERS.map(k => '<option value="' + k + '"' + (q.correct === k ? ' selected' : '') + '>' + k.toUpperCase() + '</option>').join('') + '</select></div></div>' +
+      '<div class="field"><label class="f">Pembahasan</label><textarea id="qx" name="explanation" rows="2">' + esc(q.explanation || '') + '</textarea></div></div>' +
+      '<div class="card" style="margin:0;background:var(--bg);min-height:300px"><label class="f">Pratinjau</label><div id="qPreview" class="mt" style="font-size:1.1em"></div></div></div>',
+    onOpen: ov => {
+      const qp = $('#qPreview', ov), qt = $('#qt', ov), qx = $('#qx', ov), qo = $('.qo', ov);
+      const update = () => {
+        let h = '<div>' + rich(qt.value) + '</div><div class="mt">';
+        qo.forEach((el, i) => { if (el.value) h += '<div class="opt static"><span class="k">' + LETTERS[i] + '</span><span class="pre">' + rich(el.value) + '</span></div>'; });
+        h += '</div>';
+        if (qx.value) h += '<div class="explain mt"><b>Pembahasan:</b> <span class="pre">' + rich(qx.value) + '</span></div>';
+        qp.innerHTML = h; typeset(qp);
+      };
+      qt.oninput = update; qx.oninput = update; qo.forEach(el => el.oninput = update); update();
+      const bImg = $('#btnImg', ov), fImg = $('#fileImg', ov);
+      bImg.onclick = () => fImg.click();
+      fImg.onchange = async e => {
+        const file = e.target.files[0]; if (!file) return;
+        bImg.textContent = '⏳ Mengunggah...'; bImg.disabled = true;
+        try {
+          const res = await resizeImage(file, 1000);
+          const r = await api('uploadImage', { dataUrl: res });
+          insertAtCursor(qt, '![](' + (r.id ? 'drive:' + r.id : r.url) + ')');
+          update();
+          toast('Gambar disisipkan', 'ok');
+        } catch (err) { toast(err.message, 'err'); }
+        bImg.textContent = '📷 Upload Gambar'; bImg.disabled = false; fImg.value = '';
+      };
+    },
+    onOk: async m => {
+      const data = formData(m); data.id = q.id || '';
+      await api('saveQuestion', data);
+      toast('Soal disimpan', 'ok');
+      await views.questions();
+    }
+  });
+};
+actions.delQ = async d => {
+  if (!(await confirmBox('Hapus soal?', 'Soal juga akan dikeluarkan dari paket ujian yang memakainya. Riwayat jawaban siswa tetap tersimpan.', 'Hapus', true))) return;
+  await api('deleteQuestion', { id: d.id });
+  toast('Soal dihapus', 'ok');
+  await views.questions();
+};
+
+const Q_ALIASES = {
+  topic: ['topik', 'topic', 'materi', 'kategori'], text: ['soal', 'pertanyaan', 'text', 'question'],
+  a: ['a', 'opsi a', 'pilihan a'], b: ['b', 'opsi b', 'pilihan b'], c: ['c', 'opsi c', 'pilihan c'],
+  d: ['d', 'opsi d', 'pilihan d'], e: ['e', 'opsi e', 'pilihan e'],
+  correct: ['kunci', 'kunci jawaban', 'jawaban', 'correct', 'key', 'answer'], explanation: ['pembahasan', 'penjelasan', 'explanation']
+};
+actions.importQ = () => {
+  modal({
+    title: 'Impor Soal dari CSV', size: 'lg', okText: 'Impor',
+    body: '<p class="small muted">Kolom: <code>topik, soal, a, b, c, d, e, kunci, pembahasan</code> (baris pertama = header; pemisah koma, titik koma, atau tab — boleh langsung tempel dari Excel/Sheets).</p>' +
+      '<div class="row mb"><button class="btn sm" id="tplQ">⬇ Unduh template</button><input type="file" id="fileQ" accept=".csv,.txt,.tsv" style="width:auto"></div>' +
+      '<textarea id="pasteQ" rows="9" placeholder="Tempel data di sini…"></textarea>',
+    onOpen: ov => {
+      $('#tplQ', ov).onclick = () => downloadFile('template-soal.csv', toCSV([
+        ['topik', 'soal', 'a', 'b', 'c', 'd', 'e', 'kunci', 'pembahasan'],
+        ['Aljabar', 'Jika 2x + 6 = 14, nilai x adalah ...', '3', '4', '5', '10', '', 'B', '2x = 8 sehingga x = 4']]));
+    },
+    onOk: async ov => {
+      let text = $('#pasteQ', ov).value.trim();
+      if (!text) text = (await readFileInput($('#fileQ', ov))).trim();
+      if (!text) throw new Error('Pilih file atau tempel data terlebih dahulu.');
+      const rows = parseCSV(text);
+      if (rows.length < 2) throw new Error('Data harus berisi header dan minimal satu baris.');
+      const r = await api('importQuestions', { rows: rowsToObjects(rows, Q_ALIASES) });
+      toast(r.added + ' soal berhasil diimpor', 'ok');
+      if (r.errors.length) modal({ title: r.errors.length + ' baris dilewati', hideFooter: true, body: '<ul class="small">' + r.errors.map(e => '<li>' + esc(e) + '</li>').join('') + '</ul>' });
+      await views.questions();
+    }
+  });
+};
+
+/* ------------------------------------------------------------ Paket ujian */
+let PK = { set: new Set(), questions: [] };
+
+views.texams = async function () {
+  const exams = await api('listExamsT');
+  main('<div class="row between mb"><h1 style="margin:0">Paket Ujian</h1><button class="btn primary" data-act="editExam">+ Buat Paket Ujian</button></div>' +
+    (exams.length ? '<div class="card tablewrap"><table><thead><tr><th>Judul</th><th>Soal</th><th>Durasi</th><th>KKM</th><th>Pengerjaan</th><th>Rata-rata</th><th>Status</th><th></th></tr></thead><tbody>' +
+      exams.map(e => '<tr><td><b>' + esc(e.title) + '</b>' + (e.targetClass ? ' <span class="badge gray">Kelas ' + esc(e.targetClass) + '</span>' : '') + '<br><span class="muted small">' + esc(snip(e.description, 80)) + '</span></td>' +
+        '<td>' + e.questionIds.length + '</td><td>' + (e.duration ? e.duration + ' mnt' : '∞') + '</td><td>' + e.passScore + '</td><td>' + e.attemptCount + '</td><td>' + num(e.avgScore) + '</td>' +
+        '<td><span class="badge ' + (e.active ? 'ok' : 'gray') + '">' + (e.active ? 'Aktif' : 'Nonaktif') + '</span></td>' +
+        '<td class="right" style="white-space:nowrap"><button class="btn sm" data-act="examResults" data-id="' + e.id + '">📊 Analisis</button> ' +
+        '<button class="btn sm" data-act="toggleExam" data-id="' + e.id + '">' + (e.active ? 'Nonaktifkan' : 'Aktifkan') + '</button> ' +
+        '<button class="btn sm" data-act="editExam" data-id="' + e.id + '">Edit</button> ' +
+        '<button class="btn sm danger" data-act="delExam" data-id="' + e.id + '">Hapus</button></td></tr>').join('') + '</tbody></table></div>' :
+      '<div class="card empty"><h2>Belum ada paket ujian</h2><p>Buat paket dari soal yang ada di bank soal.</p></div>'));
+  T.exams = exams;
+};
+
+actions.editExam = async d => {
+  if (!T.questions.length) T.questions = await api('listQuestions');
+  if (!T.questions.length) return toast('Isi bank soal terlebih dahulu.', 'err');
+  if (!T.students.length) T.students = await api('listStudents');
+  const e = (T.exams || []).find(x => x.id === d.id) || { duration: 30, maxAttempts: 0, passScore: 70, shuffle: true, showReview: true, active: true, questionIds: [] };
+  PK = { set: new Set(e.questionIds), questions: T.questions };
+  const topics = Array.from(new Set(T.questions.map(q => q.topic))).sort();
+  const classes = Array.from(new Set(T.students.map(s => s.class).filter(Boolean))).sort();
+  modal({
+    title: e.id ? 'Edit Paket Ujian' : 'Buat Paket Ujian', size: 'lg',
+    body: '<div class="field"><label class="f">Judul *</label><input type="text" name="title" value="' + esc(e.title || '') + '"></div>' +
+      '<div class="field"><label class="f">Deskripsi / petunjuk</label><textarea name="description" rows="2">' + esc(e.description || '') + '</textarea></div>' +
+      '<div class="grid g4"><div class="field"><label class="f">Durasi (menit, 0 = bebas)</label><input type="number" name="duration" min="0" value="' + e.duration + '"></div>' +
+      '<div class="field"><label class="f">KKM (0–100)</label><input type="number" name="passScore" min="0" max="100" value="' + e.passScore + '"></div>' +
+      '<div class="field"><label class="f">Maks. percobaan (0 = bebas)</label><input type="number" name="maxAttempts" min="0" value="' + e.maxAttempts + '"></div>' +
+      '<div class="field"><label class="f">Khusus kelas</label><input type="text" name="targetClass" list="clsList" value="' + esc(e.targetClass || '') + '" placeholder="Kosong = semua"><datalist id="clsList">' + classes.map(c => '<option value="' + esc(c) + '">').join('') + '</datalist></div></div>' +
+      '<div class="row mb"><label class="check"><input type="checkbox" name="shuffle"' + (e.shuffle ? ' checked' : '') + '> Acak urutan soal</label>' +
+      '<label class="check"><input type="checkbox" name="showReview"' + (e.showReview ? ' checked' : '') + '> Tampilkan pembahasan setelah selesai</label>' +
+      '<label class="check"><input type="checkbox" name="active"' + (e.active ? ' checked' : '') + '> Aktif (terlihat oleh siswa)</label></div>' +
+      '<h3>Pilih soal</h3><div class="toolbar"><input type="text" id="pkq" placeholder="🔍 Cari…" data-input="pkDraw"><select id="pkt" data-change="pkDraw">' + optsSelect(topics, '', 'Semua topik') + '</select>' +
+      '<button class="btn sm" data-act="pkAll">Pilih yang tampil</button><button class="btn sm" data-act="pkNone">Kosongkan</button><span class="badge" id="pkcount"></span></div>' +
+      '<div id="pklist" style="max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:9px;padding:8px 12px"></div>',
+    onOpen: () => drawPicker(),
+    onOk: async m => {
+      const data = formData(m); data.id = e.id || ''; data.questionIds = Array.from(PK.set);
+      await api('saveExam', data);
+      toast('Paket ujian disimpan', 'ok');
+      await views.texams();
+    }
+  });
+};
+function pickerList() {
+  const q = $('#pkq').value.toLowerCase(), t = $('#pkt').value;
+  return PK.questions.filter(x => (!t || x.topic === t) && (!q || (x.text + ' ' + x.topic).toLowerCase().indexOf(q) >= 0));
+}
+function drawPicker() {
+  const list = pickerList();
+  $('#pklist').innerHTML = list.map(x =>
+    '<label class="check" style="align-items:flex-start"><input type="checkbox" data-change="pkToggle" data-id="' + x.id + '"' + (PK.set.has(x.id) ? ' checked' : '') + '>' +
+    '<span><span class="badge gray">' + esc(x.topic) + '</span> ' + esc(snip(x.text, 130)) + '</span></label>').join('') || '<div class="empty">Tidak ada soal.</div>';
+  $('#pkcount').textContent = PK.set.size + ' soal dipilih';
+}
+actions.pkDraw = () => drawPicker();
+actions.pkToggle = (d, el) => { el.checked ? PK.set.add(d.id) : PK.set.delete(d.id); $('#pkcount').textContent = PK.set.size + ' soal dipilih'; };
+actions.pkAll = () => { pickerList().forEach(x => PK.set.add(x.id)); drawPicker(); };
+actions.pkNone = () => { PK.set.clear(); drawPicker(); };
+
+actions.toggleExam = async d => {
+  const e = T.exams.find(x => x.id === d.id);
+  await api('saveExam', Object.assign({}, e, { active: !e.active }));
+  await views.texams();
+};
+actions.delExam = async d => {
+  const e = T.exams.find(x => x.id === d.id);
+  const msg = 'Paket "' + e.title + '" dan ' + e.attemptCount + ' data pengerjaan siswa akan dihapus permanen.';
+  if (!(await confirmBox('Hapus paket ujian?', msg, 'Hapus', true))) return;
+  await api('deleteExam', { id: d.id });
+  toast('Paket ujian dihapus', 'ok');
+  await views.texams();
+};
+actions.examResults = async d => {
+  T.res = { examId: d.id, class: '' };
+  await go('results');
+  await actions.analysis();
+};
+
+/* ------------------------------------------------------------------ Siswa */
+views.students = async function () {
+  T.students = await api('listStudents');
+  const classes = Array.from(new Set(T.students.map(s => s.class).filter(Boolean))).sort();
+  main('<div class="row between mb"><h1 style="margin:0">Data Siswa</h1><div class="row">' +
+    '<button class="btn" data-act="importS">⬆ Impor CSV</button><button class="btn primary" data-act="editS">+ Tambah Siswa</button></div></div>' +
+    '<div class="card"><div class="toolbar"><input type="text" placeholder="🔍 Cari nama / username…" data-input="sFilter" name="q" value="' + esc(T.sf.q) + '">' +
+    '<select name="cls" data-change="sFilter">' + optsSelect(classes, T.sf.cls, 'Semua kelas') + '</select><span class="muted small" id="sCount"></span></div>' +
+    '<div class="tablewrap"><table><thead><tr><th>Nama</th><th>Username</th><th>Kelas</th><th>Status</th><th>Ujian</th><th>Rata-rata</th><th></th></tr></thead><tbody id="sBody"></tbody></table></div></div>');
+  drawS();
+};
+function drawS() {
+  const q = T.sf.q.toLowerCase();
+  const list = T.students.filter(s => (!T.sf.cls || s.class === T.sf.cls) && (!q || (s.name + ' ' + s.username).toLowerCase().indexOf(q) >= 0));
+  $('#sCount').textContent = list.length + ' dari ' + T.students.length + ' siswa';
+  $('#sBody').innerHTML = list.length ? list.map(s =>
+    '<tr><td><a href="#" data-act="studentDetail" data-id="' + s.id + '"><b>' + esc(s.name) + '</b></a></td><td><code>' + esc(s.username) + '</code></td><td>' + esc(s.class) + '</td>' +
+    '<td><span class="badge ' + (s.active ? 'ok' : 'gray') + '">' + (s.active ? 'Aktif' : 'Nonaktif') + '</span></td><td>' + s.attemptCount + '</td><td>' + num(s.avgScore) + '</td>' +
+    '<td class="right" style="white-space:nowrap"><button class="btn sm" data-act="editS" data-id="' + s.id + '">Edit</button> ' +
+    '<button class="btn sm" data-act="resetPw" data-id="' + s.id + '">Reset PW</button> ' +
+    '<button class="btn sm danger" data-act="delS" data-id="' + s.id + '">Hapus</button></td></tr>').join('') :
+    '<tr><td colspan="7" class="empty">Belum ada siswa. Tambahkan satu per satu atau impor dari CSV.</td></tr>';
+}
+actions.sFilter = (d, el) => { T.sf[el.name] = el.value; drawS(); };
+
+actions.editS = d => {
+  const s = T.students.find(x => x.id === d.id) || { active: true };
+  modal({
+    title: s.id ? 'Edit Siswa' : 'Tambah Siswa',
+    body: '<div class="field"><label class="f">Nama lengkap *</label><input type="text" name="name" value="' + esc(s.name || '') + '"></div>' +
+      '<div class="grid g2"><div class="field"><label class="f">Username (NIS) *</label><input type="text" name="username" autocapitalize="none" value="' + esc(s.username || '') + '"></div>' +
+      '<div class="field"><label class="f">Kelas</label><input type="text" name="class" value="' + esc(s.class || '') + '" placeholder="mis. 7A"></div></div>' +
+      '<div class="field"><label class="f">Password ' + (s.id ? '(kosongkan jika tidak diubah)' : '*') + '</label><input type="text" name="password" autocomplete="off" placeholder="min. 4 karakter"></div>' +
+      '<label class="check"><input type="checkbox" name="active"' + (s.active ? ' checked' : '') + '> Akun aktif</label>',
+    onOk: async m => {
+      const data = formData(m); data.id = s.id || '';
+      await api('saveStudent', data);
+      toast('Siswa disimpan', 'ok');
+      await views.students();
+    }
+  });
+};
+actions.delS = async d => {
+  const s = T.students.find(x => x.id === d.id);
+  if (!(await confirmBox('Hapus siswa?', s.name + ' beserta seluruh riwayat ujiannya akan dihapus permanen. (Untuk sekadar menonaktifkan, gunakan Edit.)', 'Hapus', true))) return;
+  await api('deleteStudent', { id: d.id });
+  toast('Siswa dihapus', 'ok');
+  await views.students();
+};
+actions.resetPw = async d => {
+  const s = T.students.find(x => x.id === d.id);
+  if (!(await confirmBox('Reset password?', 'Password baru acak akan dibuat untuk ' + s.name + '.', 'Reset'))) return;
+  const r = await api('resetPassword', { id: d.id });
+  showCredentials([r], 'Password baru');
+};
+
+const S_ALIASES = {
+  username: ['username', 'nis', 'user', 'id'], name: ['nama', 'name', 'nama lengkap'],
+  class: ['kelas', 'class'], password: ['password', 'sandi', 'kata sandi']
+};
+actions.importS = () => {
+  modal({
+    title: 'Impor Siswa dari CSV', size: 'lg', okText: 'Impor',
+    body: '<p class="small muted">Kolom: <code>username, nama, kelas, password</code>. Password boleh dikosongkan — sistem membuatkan password acak dan menampilkannya setelah impor.</p>' +
+      '<div class="row mb"><button class="btn sm" id="tplS">⬇ Unduh template</button><input type="file" id="fileS" accept=".csv,.txt,.tsv" style="width:auto"></div>' +
+      '<textarea id="pasteS" rows="9" placeholder="username,nama,kelas,password&#10;1001,Andi Pratama,7A,&#10;1002,Bunga Lestari,7A,"></textarea>',
+    onOpen: ov => {
+      $('#tplS', ov).onclick = () => downloadFile('template-siswa.csv', toCSV([['username', 'nama', 'kelas', 'password'], ['1001', 'Andi Pratama', '7A', ''], ['1002', 'Bunga Lestari', '7A', '']]));
+    },
+    onOk: async ov => {
+      let text = $('#pasteS', ov).value.trim();
+      if (!text) text = (await readFileInput($('#fileS', ov))).trim();
+      if (!text) throw new Error('Pilih file atau tempel data terlebih dahulu.');
+      const rows = parseCSV(text);
+      if (rows.length < 2) throw new Error('Data harus berisi header dan minimal satu baris.');
+      const r = await api('importStudents', { rows: rowsToObjects(rows, S_ALIASES) });
+      await views.students();
+      if (r.credentials.length) showCredentials(r.credentials, r.added + ' siswa diimpor' + (r.errors.length ? ' · ' + r.errors.length + ' dilewati' : ''), r.errors);
+      else toast('Tidak ada siswa yang diimpor: ' + (r.errors[0] || ''), 'err');
+    }
+  });
+};
+function showCredentials(list, title, errors) {
+  modal({
+    title: title, size: 'lg', hideFooter: true,
+    body: '<div class="insight mb small">⚠️ Catat atau unduh sekarang — password hanya ditampilkan sekali dan tidak dapat dilihat lagi.</div>' +
+      '<div class="row mb"><button class="btn primary sm" id="dlCred">⬇ Unduh CSV kredensial</button></div>' +
+      '<div class="tablewrap"><table><thead><tr><th>Nama</th><th>Kelas</th><th>Username</th><th>Password</th></tr></thead><tbody>' +
+      list.map(c => '<tr><td>' + esc(c.name) + '</td><td>' + esc(c.class || '') + '</td><td><code>' + esc(c.username) + '</code></td><td><code>' + esc(c.password) + '</code></td></tr>').join('') + '</tbody></table></div>' +
+      (errors && errors.length ? '<h3 class="mt">Dilewati</h3><ul class="small">' + errors.map(e => '<li>' + esc(e) + '</li>').join('') + '</ul>' : ''),
+    onOpen: ov => {
+      $('#dlCred', ov).onclick = () => downloadFile('kredensial-siswa.csv', toCSV([['Nama', 'Kelas', 'Username', 'Password']].concat(list.map(c => [c.name, c.class || '', c.username, c.password]))));
+    }
+  });
+}
+
+/* ------------------------------------------------------------------ Hasil */
+views.results = async function () {
+  const r = await api('results', T.res);
+  T.resRows = r.rows;
+  main('<div class="row between mb"><h1 style="margin:0">Hasil Ujian</h1><div class="toolbar" style="margin:0">' +
+    '<select name="examId" data-change="resFilter">' + optsSelect(r.filters.exams, T.res.examId, 'Semua ujian') + '</select>' +
+    '<select name="class" data-change="resFilter">' + optsSelect(r.filters.classes, T.res.class, 'Semua kelas') + '</select>' +
+    '<button class="btn" data-act="exportRes">⬇ Ekspor CSV</button>' +
+    '<button class="btn primary" data-act="analysis" ' + (T.res.examId ? '' : 'disabled title="Pilih ujian dahulu"') + '>🔬 Analisis butir soal</button></div></div>' +
+    '<div class="card tablewrap"><table><thead><tr><th>Siswa</th><th>Kelas</th><th>Ujian</th><th>Benar</th><th>Nilai</th><th>Durasi</th><th>Dikumpulkan</th></tr></thead><tbody>' +
+    (r.rows.length ? r.rows.map(x => '<tr class="click" data-act="studentDetail" data-id="' + x.userId + '"><td><b>' + esc(x.name) + '</b></td><td>' + esc(x.class) + '</td><td>' + esc(x.exam) + '</td>' +
+      '<td>' + x.correct + '/' + x.total + '</td><td><span class="badge ' + (x.passed ? 'ok' : 'bad') + '">' + num(x.score) + '</span></td><td>' + num(x.durationMin) + ' mnt</td><td>' + fmtDate(x.submittedAt) + '</td></tr>').join('')
+      : '<tr><td colspan="7" class="empty">Belum ada hasil.</td></tr>') + '</tbody></table></div><div id="analysis"></div>');
+};
+actions.resFilter = (d, el) => { T.res[el.name] = el.value; return go('results'); };
+actions.exportRes = () => {
+  if (!T.resRows.length) return toast('Tidak ada data untuk diekspor.', 'err');
+  downloadFile('hasil-ujian.csv', toCSV([['Nama', 'Username', 'Kelas', 'Ujian', 'Benar', 'Total', 'Nilai', 'Tuntas', 'Durasi (menit)', 'Dikumpulkan']]
+    .concat(T.resRows.map(x => [x.name, x.username, x.class, x.exam, x.correct, x.total, x.score, x.passed ? 'Ya' : 'Tidak', x.durationMin, fmtDate(x.submittedAt)]))));
+};
+
+actions.analysis = async () => {
+  if (!T.res.examId) return toast('Pilih ujian terlebih dahulu.', 'err');
+  const a = await api('examAnalysis', T.res);
+  const s = a.summary;
+  const box = $('#analysis');
+  box.innerHTML = '<h2 class="mt">🔬 Analisis butir soal — ' + esc(a.exam.title) + '</h2>' +
+    '<div class="grid g4 mb">' + stat(s.attempts, 'Pengerjaan') + stat(num(s.avg), 'Rata-rata') + stat(num(s.median), 'Median') +
+    stat(num(s.passRate) + '%', 'Tuntas (KKM ' + a.exam.passScore + ')') + stat(num(s.min) + ' – ' + num(s.max), 'Rentang nilai') + stat(num(s.stdev), 'Simpangan baku') + '</div>' +
+    '<div class="card"><p class="muted small">' +
+    '<b>% Benar</b>: tingkat kesukaran (≥80 mudah, &lt;40 sulit). <b>Daya beda</b>: selisih benar kelompok atas vs bawah (27%); ideal ≥ 0,3' +
+    (a.discriminationAvailable ? '' : ' — butuh minimal 6 pengerjaan') + '. <b>Sebaran</b>: jumlah pemilih tiap opsi, kunci berwarna hijau. Klik baris untuk melihat siswa yang salah.</p>' +
+    '<div class="tablewrap"><table><thead><tr><th>#</th><th>Soal</th><th style="min-width:140px">% Benar</th><th>Tingkat</th><th>Daya beda</th><th>Sebaran jawaban</th><th>Catatan</th></tr></thead><tbody>' +
+    a.items.map(it => '<tr class="click" data-act="wrongStudentsExam" data-id="' + it.id + '"><td>' + it.no + '</td><td><div>' + esc(it.text) + '</div><span class="badge gray">' + esc(it.topic) + '</span></td>' +
+      '<td>' + (it.correctRate == null ? '-' : '<b>' + num(it.correctRate) + '%</b>' + bar(it.correctRate, rateClass(it.correctRate))) + '</td>' +
+      '<td><span class="badge ' + (it.level === 'Mudah' ? 'ok' : it.level === 'Sulit' ? 'bad' : 'warn') + '">' + it.level + '</span></td>' +
+      '<td>' + (it.discrimination == null ? '-' : num(it.discrimination)) + '</td>' +
+      '<td style="white-space:nowrap">' + it.options.map(o => '<span class="badge ' + (o.k === it.correct ? 'ok' : 'gray') + '">' + o.k.toUpperCase() + ' ' + o.count + '</span>').join(' ') + (it.blank ? ' <span class="badge">kosong ' + it.blank + '</span>' : '') + '</td>' +
+      '<td class="small">' + it.flags.map(f => '<div>⚠ ' + esc(f) + '</div>').join('') + '</td></tr>').join('') + '</tbody></table></div></div>';
+  box.scrollIntoView({ behavior: 'smooth' });
+};
+</script>

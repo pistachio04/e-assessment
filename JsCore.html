@@ -1,0 +1,328 @@
+<script>
+/* ===================== Core: state, helpers, auth, shell ===================== */
+const S = { token: null, user: null, offset: 0, view: null };
+const actions = {};       // handler untuk atribut data-act
+const views = {};         // fungsi render halaman
+
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const num = v => (v == null ? '-' : String(v).replace('.', ','));
+
+function fmtDate(ms) {
+  if (!ms) return '-';
+  return new Date(ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+function fmtDay(ms) { return new Date(ms).toLocaleDateString('id-ID', { day: '2-digit', month: 'short' }); }
+function fmtDur(ms) {
+  const s = Math.round(ms / 1000), m = Math.floor(s / 60);
+  return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+}
+function scoreClass(score, pass) { return score >= pass ? 'ok' : (score >= pass * 0.7 ? 'warn' : 'bad'); }
+function rateClass(rate) { return rate >= 70 ? 'ok' : rate >= 40 ? 'warn' : 'bad'; }   // % benar
+function bar(pct, cls) { return '<div class="bar ' + (cls || '') + '"><span style="width:' + Math.max(0, Math.min(100, pct)) + '%"></span></div>'; }
+
+/* ---------- Teks kaya: gambar + rumus matematika ----------
+ * Sintaks yang dipakai guru di soal / opsi / pembahasan:
+ *   Gambar : ![keterangan](drive:FILEID)  atau  ![](https://alamat-gambar)
+ *   Rumus  : $x^2 + 1$  (sebaris)  |  $$\\frac{a}{b}$$  (blok)  |  \\(...\\)  |  \\[...\\]
+ * Teks di-escape dulu, baru markup gambar diubah menjadi <img> (aman dari injeksi HTML).
+ */
+function imgSrc(u) {
+  u = String(u).trim();
+  let m;
+  if ((m = /^drive:([\w-]+)$/.exec(u))) return 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w1000';
+  if ((m = /^https:\/\/drive\.google\.com\/(?:file\/d\/|open\?id=|uc\?(?:export=\w+&)?id=)([\w-]+)/.exec(u))) return 'https://drive.google.com/thumbnail?id=' + m[1] + '&sz=w1000';
+  if (/^https:\/\/[^\s"'<>]+$/.test(u)) return u;
+  return null;
+}
+function rich(text) {
+  return esc(text).replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (all, alt, url) => {
+    const src = imgSrc(url.replace(/&amp;/g, '&'));
+    return src ? '<img src="' + esc(src) + '" alt="' + alt + '" loading="lazy" referrerpolicy="no-referrer">' : all;
+  });
+}
+/* Teks polos untuk tabel/ringkasan: gambar -> [gambar] */
+function plain(text) { return String(text == null ? '' : text).replace(/!\[[^\]]*\]\([^)\s]*\)/g, '[gambar]'); }
+/* Render rumus (KaTeX) pada elemen; aman bila KaTeX belum / gagal dimuat. */
+function typeset(root) {
+  if (!root || typeof window.renderMathInElement !== 'function') return;
+  try {
+    window.renderMathInElement(root, {
+      delimiters: [
+        { left: '$$', right: '$$', display: true }, { left: '\\[', right: '\\]', display: true },
+        { left: '\\(', right: '\\)', display: false }, { left: '$', right: '$', display: false }
+      ],
+      throwOnError: false
+    });
+  } catch (e) { /* abaikan */ }
+}
+window.addEventListener('load', () => typeset(document.body));
+
+/* Perkecil gambar di browser sebelum diunggah (maks 1000px, JPEG) agar cepat & hemat Drive. */
+function resizeImage(file, maxW) {
+  return new Promise((resolve, reject) => {
+    if (!/^image\/(png|jpe?g|gif|webp)$/.test(file.type)) return reject(new Error('Format harus PNG, JPG, GIF, atau WEBP.'));
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      const k = Math.min(1, maxW / img.width);
+      const c = document.createElement('canvas');
+      c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+      const g = c.getContext('2d');
+      g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);   // latar putih untuk PNG transparan
+      g.drawImage(img, 0, 0, c.width, c.height);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Gagal membaca gambar.')); };
+    img.src = url;
+  });
+}
+/* Sisipkan teks pada posisi kursor input/textarea. */
+function insertAtCursor(el, text) {
+  const s = el.selectionStart == null ? el.value.length : el.selectionStart;
+  const e = el.selectionEnd == null ? s : el.selectionEnd;
+  el.value = el.value.slice(0, s) + text + el.value.slice(e);
+  const pos = s + text.length;
+  el.focus(); el.setSelectionRange(pos, pos);
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+/* ---------- API ---------- */
+function api(method, payload, opts) {
+  opts = opts || {};
+  if (!opts.silent) loading(true);
+  return new Promise((resolve, reject) => {
+    google.script.run
+      .withSuccessHandler(r => {
+        if (!opts.silent) loading(false);
+        if (r && r.ok) return resolve(r.data);
+        const err = new Error(r ? r.error : 'Tidak ada respons dari server');
+        if (r && r.auth) { err.auth = true; sessionExpired(); }
+        reject(err);
+      })
+      .withFailureHandler(e => {
+        if (!opts.silent) loading(false);
+        reject(new Error((e && e.message) || 'Gagal terhubung ke server'));
+      })
+      .api(method, S.token, payload || {});
+  });
+}
+/* Jalankan aksi async dengan penanganan error standar (toast). */
+async function run(fn) {
+  try { return await fn(); } catch (e) { if (!e.auth) toast(e.message, 'err'); return undefined; }
+}
+
+let loadingCount = 0;
+function loading(on) {
+  loadingCount = Math.max(0, loadingCount + (on ? 1 : -1));
+  $('#loader').classList.toggle('hidden', loadingCount === 0);
+}
+function toast(msg, type) {
+  const el = document.createElement('div');
+  el.className = 'toast ' + (type || '');
+  el.textContent = msg;
+  $('#toasts').appendChild(el);
+  setTimeout(() => el.remove(), type === 'err' ? 5000 : 2800);
+}
+
+/* ---------- Modal ---------- */
+function modal(o) {
+  const ov = document.createElement('div');
+  ov.className = 'overlay';
+  ov.innerHTML =
+    '<div class="modal ' + (o.size || '') + '"><header><h3>' + esc(o.title) + '</h3><button class="x" aria-label="Tutup">&times;</button></header>' +
+    '<div class="body">' + o.body + '</div>' +
+    (o.hideFooter ? '' : '<footer><button class="btn" data-close>' + esc(o.cancelText || 'Batal') + '</button>' +
+      '<button class="btn ' + (o.danger ? 'danger solid' : 'primary') + '" data-ok>' + esc(o.okText || 'Simpan') + '</button></footer>') +
+    '</div>';
+  document.body.appendChild(ov);
+  typeset(ov);
+  const close = () => ov.remove();
+  ov.close = close;
+  $('.x', ov).onclick = close;
+  const cancel = $('[data-close]', ov); if (cancel) cancel.onclick = close;
+  const ok = $('[data-ok]', ov);
+  if (ok) ok.onclick = async () => {
+    if (!o.onOk) return close();
+    ok.disabled = true;
+    try { const keep = await o.onOk(ov); if (keep !== false) close(); }
+    catch (e) { if (!e.auth) toast(e.message, 'err'); }
+    finally { ok.disabled = false; }
+  };
+  if (o.onOpen) o.onOpen(ov);
+  return ov;
+}
+function confirmBox(title, message, okText, danger) {
+  return new Promise(resolve => {
+    let done = false;
+    const m = modal({
+      title: title, body: '<p class="pre">' + esc(message) + '</p>', okText: okText || 'Ya', danger: danger, cancelText: 'Batal',
+      onOk: () => { done = true; resolve(true); }
+    });
+    const obs = new MutationObserver(() => { if (!document.body.contains(m)) { obs.disconnect(); if (!done) resolve(false); } });
+    obs.observe(document.body, { childList: true });
+  });
+}
+/* Kumpulkan nilai form berdasarkan atribut name. */
+function formData(root) {
+  const d = {};
+  $$('[name]', root).forEach(el => { d[el.name] = el.type === 'checkbox' ? el.checked : el.value; });
+  return d;
+}
+
+/* ---------- CSV ---------- */
+function parseCSV(text) {
+  text = text.replace(/^\uFEFF/, '');
+  const first = text.split(/\r?\n/)[0] || '';
+  const delim = first.indexOf('\t') >= 0 ? '\t' : (first.split(';').length > first.split(',').length ? ';' : ',');
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { cur += '"'; i++; } else q = false; } else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === delim) { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') { if (c === '\r' && text[i + 1] === '\n') i++; row.push(cur); cur = ''; rows.push(row); row = []; }
+    else cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows.filter(r => r.some(x => String(x).trim() !== ''));
+}
+function toCSV(rows) {
+  return rows.map(r => r.map(v => {
+    if (typeof v === 'string' && /^[=+@]/.test(v)) v = "'" + v;      // cegah formula injection di Excel/Sheets
+    v = String(v == null ? '' : v);
+    return /[",\n\r]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+  }).join(',')).join('\r\n');
+}
+function downloadFile(name, text, mime) {
+  const blob = new Blob(['\uFEFF' + text], { type: (mime || 'text/csv') + ';charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+/* Ubah baris CSV (baris pertama = header) menjadi objek memakai alias nama kolom. */
+function rowsToObjects(rows, aliases) {
+  const head = rows[0].map(h => String(h).trim().toLowerCase());
+  const map = head.map(h => { for (const k in aliases) if (aliases[k].indexOf(h) >= 0) return k; return null; });
+  return rows.slice(1).map(r => { const o = {}; map.forEach((k, i) => { if (k) o[k] = r[i] == null ? '' : String(r[i]).trim(); }); return o; });
+}
+function readFileInput(input) {
+  return new Promise((resolve, reject) => {
+    const f = input.files && input.files[0];
+    if (!f) return resolve('');
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result)); fr.onerror = () => reject(new Error('Gagal membaca file'));
+    fr.readAsText(f);
+  });
+}
+
+/* ---------- Sesi & shell ---------- */
+function saveToken(t) { try { sessionStorage.setItem('ea_token', t || ''); } catch (e) { /* abaikan */ } }
+function loadToken() { try { return sessionStorage.getItem('ea_token') || ''; } catch (e) { return ''; } }
+
+async function boot() {
+  document.addEventListener('click', e => {
+    const t = e.target.closest('[data-act]');
+    if (!t || t.disabled) return;
+    const fn = actions[t.dataset.act];
+    if (fn) { e.preventDefault(); run(() => fn(t.dataset, t, e)); }
+  });
+  ['change', 'input'].forEach(type => document.addEventListener(type, e => {
+    const t = e.target.closest('[data-' + type + ']');
+    const fn = t && actions[t.dataset[type]];
+    if (fn) run(() => fn(t.dataset, t, e));
+  }));
+  S.token = loadToken();
+  if (!S.token) return loginView();
+  try {
+    loading(true);
+    const r = await api('me', {}, { silent: true });
+    S.user = r.user;
+    enterApp();
+  } catch (e) { loginView(); }
+  finally { loading(false); }
+}
+
+function sessionExpired() {
+  if (!S.token) return;
+  S.token = null; S.user = null; saveToken('');
+  if (typeof Q !== 'undefined') Q = null;
+  loginView('Sesi berakhir, silakan login kembali.');
+}
+
+function loginView(notice) {
+  $('#app').innerHTML =
+    '<div class="login"><form class="card" id="loginForm" autocomplete="on">' +
+    '<div class="center mb"><div class="brand" style="justify-content:center;font-size:1.5rem"><i>E</i> E-Assessment</div>' +
+    '<p class="muted">Silakan masuk untuk melanjutkan</p></div>' +
+    (notice ? '<div class="insight mb small">' + esc(notice) + '</div>' : '') +
+    '<div class="field"><label class="f" for="u">Username</label><input type="text" id="u" name="username" autocomplete="username" autocapitalize="none" required autofocus></div>' +
+    '<div class="field"><label class="f" for="p">Password</label><input type="password" id="p" name="password" autocomplete="current-password" required></div>' +
+    '<button class="btn primary" style="width:100%;justify-content:center" type="submit">Masuk</button>' +
+    '<p class="muted small center mt">Lupa password? Hubungi gurumu.</p></form></div>';
+  $('#loginForm').onsubmit = e => {
+    e.preventDefault();
+    run(async () => {
+      const r = await api('login', formData(e.target));
+      S.token = r.token; S.user = r.user; S.offset = r.serverNow - Date.now();
+      saveToken(r.token);
+      enterApp();
+      if (r.warnDefaultPassword) toast('Password bawaan masih dipakai — segera ganti lewat menu "Ganti Password".', 'err');
+    });
+  };
+}
+
+function navItems() {
+  return S.user.role === 'teacher'
+    ? [['dashboard', '📊 Dashboard'], ['questions', '📝 Bank Soal'], ['texams', '🗂️ Paket Ujian'], ['students', '👥 Siswa'], ['results', '🏆 Hasil']]
+    : [['exams', '📚 Ujian'], ['history', '🕘 Riwayat']];
+}
+
+function enterApp(view) {
+  S.view = view || navItems()[0][0];
+  renderShell();
+  go(S.view);
+}
+
+function renderShell() {
+  $('#app').innerHTML =
+    '<div class="topbar"><div class="in"><div class="brand"><i>E</i> E-Assessment</div>' +
+    '<nav class="nav">' + navItems().map(n => '<button data-act="nav" data-v="' + n[0] + '" id="nav-' + n[0] + '">' + n[1] + '</button>').join('') + '</nav>' +
+    '<div class="usermenu"><div class="right small"><b>' + esc(S.user.name) + '</b><br><span class="muted">' +
+    (S.user.role === 'teacher' ? 'Guru' : 'Kelas ' + esc(S.user.class || '-')) + '</span></div>' +
+    '<button class="btn sm" data-act="changePw">🔑 Ganti Password</button>' +
+    '<button class="btn sm" data-act="logout">Keluar</button></div></div></div>' +
+    '<main class="container" id="main"></main>';
+}
+
+async function go(view) {
+  S.view = view;
+  $$('.nav button').forEach(b => b.classList.toggle('active', b.id === 'nav-' + view));
+  $('#main').innerHTML = '<div class="empty">Memuat…</div>';
+  await run(() => views[view]());
+  window.scrollTo(0, 0);
+}
+function main(html) { $('#main').innerHTML = html; typeset($('#main')); }
+
+actions.nav = d => go(d.v);
+actions.logout = async () => {
+  try { await api('logout', {}, { silent: true }); } catch (e) { /* abaikan */ }
+  S.token = null; S.user = null; saveToken('');
+  loginView();
+};
+actions.changePw = () => {
+  modal({
+    title: 'Ganti Password', okText: 'Simpan',
+    body: '<div class="field"><label class="f">Password lama</label><input type="password" name="oldPassword" autocomplete="current-password"></div>' +
+      '<div class="field"><label class="f">Password baru (min. 6 karakter)</label><input type="password" name="newPassword" autocomplete="new-password"></div>',
+    onOk: async m => { await api('changePassword', formData(m)); toast('Password berhasil diganti', 'ok'); }
+  });
+};
+
+window.addEventListener('error', e => { console.error(e.error || e.message); });
+</script>
